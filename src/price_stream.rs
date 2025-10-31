@@ -1,21 +1,27 @@
 use crate::config::PriceFeed;
+use crate::jupiter::JupiterClient;
 use crate::model::{AppState, HermesResponse, ParsedPriceData, PriceInfo};
 use crate::simulation::apply_price_update;
 use anyhow::Result;
 use futures_util::StreamExt;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-pub async fn run(state: AppState, feed: PriceFeed) {
+pub async fn run(state: AppState, jupiter: Option<Arc<JupiterClient>>, feed: PriceFeed) {
     loop {
-        if let Err(err) = stream_prices(state.clone(), feed).await {
+        if let Err(err) = stream_prices(state.clone(), jupiter.clone(), feed).await {
             eprintln!("price stream error: {err:?}");
             sleep(Duration::from_secs(3)).await;
         }
     }
 }
 
-async fn stream_prices(state: AppState, feed: PriceFeed) -> Result<()> {
+async fn stream_prices(
+    state: AppState,
+    jupiter: Option<Arc<JupiterClient>>,
+    feed: PriceFeed,
+) -> Result<()> {
     let client = reqwest::Client::new();
     let response = client
         .get(feed.stream_url())
@@ -39,7 +45,9 @@ async fn stream_prices(state: AppState, feed: PriceFeed) -> Result<()> {
             }
 
             if let Some(payload) = line.strip_prefix("data:") {
-                if let Err(err) = handle_payload(payload.trim(), state.clone()).await {
+                if let Err(err) =
+                    handle_payload(payload.trim(), state.clone(), jupiter.clone()).await
+                {
                     eprintln!("failed to handle price payload: {err:?}");
                 }
             }
@@ -49,12 +57,16 @@ async fn stream_prices(state: AppState, feed: PriceFeed) -> Result<()> {
     Ok(())
 }
 
-async fn handle_payload(payload: &str, state: AppState) -> Result<()> {
+async fn handle_payload(
+    payload: &str,
+    state: AppState,
+    jupiter: Option<Arc<JupiterClient>>,
+) -> Result<()> {
     let parsed: HermesResponse = serde_json::from_str(payload)?;
 
     for price in parsed.parsed {
         if let Some(price_info) = to_price_info(price.price) {
-            apply_price_update(&state, price_info).await;
+            apply_price_update(&state, price_info, jupiter.clone()).await;
         }
     }
 
